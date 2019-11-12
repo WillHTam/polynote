@@ -2,6 +2,57 @@
 
 * 
 
+# 0.2.13 (Nov 7, 2019)
+
+* Improve remote kernel error handling
+* Make LimitedSharingClassLoader configurable (thanks @ghoto !)
+* Remove `sun.misc.Cleaner` which is messes up JDK9+
+* Resolve insecure py4j gateway issue (thanks again, @ghoto !)
+* Fix bug in handling empty configs
+* Add ability to specify multiple storage mounts
+
+# 0.2.12 (Nov 5, 2019)
+
+* Updated notebook list UI, with ability to rename and delete notebooks (right click), navigate with keyboard, etc
+* Fixed classloading bug causing e.g. #588
+* Don't override spark.app.name if it's set in the spark config
+* Fix bug causing issues importing shared modules installed inside virtual environments
+* Publish snapshot artifacts of all modules to sonatype
+
+# 0.2.11 (October 31, 2019)
+    
+* Happy Halloween! This spoooooky release includes some minor bugfixes!
+* Remove scala from the runtime assembly jars
+* Set Python's sys.argv to prevent some libraries from complaining
+* Configurable base URI, useful when behind a proxy
+
+# 0.2.10 (October 30, 2019)
+
+* Fix an NPE when trying to encode a null string
+* Fix issue with package cells not working at all when Spark is enabled
+* Self-host some external resources (font-awesome icons and katex)
+* Fix critical issue in plot aggregations for collections-of-case-classes
+* Attempt to fit initial plot size into available area in plot editor (fixes axes being cut off when window is too small)
+
+# 0.2.9 (October 29, 2019)
+
+* *New Python Runscript* which should hopefully help people who have been having trouble linking with Jep
+* *Improved Security* by adding a unique websocket key generated on server start, reducing the chance of attacks on 
+  the local websocket by malicious users 
+* *Support for `package` definitions in Scala Cells*: users can now define package cells that are independent from other 
+  notebook cells, useful for solving serialization issues and other problems. 
+* Update Scala to `2.11.12` fixing the error people were having on JDK 9+
+* Fix a bug with numeric aggregations (thanks @JD557 !)
+* Fix a bug causing compatibility issues on newer JVMs (thanks @diesalbla)
+* Fix a bug causing missing state when new interpreters are started in the middle of a notebook session
+* Fix compatibility with Python 3.8
+* No longer shadowing Scala SparkSession variable `spark` in Python cells. PySpark users should use the `pysparksession` 
+  variable to access Pyspark's SparkSession. This is a temporary solution until we have a better one in place. 
+
+# 0.2.8 (October 23, 2019)
+
+* Fixes a dependency clash which was causing `NoSuchMethodError` and similar.
+
 # 0.2.7 (October 23, 2019)
 
 * Cross build for Scala 2.12

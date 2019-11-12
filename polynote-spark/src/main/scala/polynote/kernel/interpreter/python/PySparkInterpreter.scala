@@ -1,23 +1,37 @@
 package polynote.kernel.interpreter.python
 
+import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicReference
 
+import org.apache.commons.lang3.RandomStringUtils
 import org.apache.spark.sql.SparkSession
 import polynote.kernel.{BaseEnv, GlobalEnv, ScalaCompiler, TaskManager}
 import polynote.kernel.environment.{Config, CurrentNotebook, CurrentTask}
 import polynote.kernel.interpreter.Interpreter
 import py4j.GatewayServer
-import zio.{Task, RIO, ZIO}
+import py4j.GatewayServer.GatewayServerBuilder
+import zio.{RIO, Task, ZIO}
 import zio.blocking.{Blocking, effectBlocking}
 
 object PySparkInterpreter {
+
+  private lazy val py4jToken: String = RandomStringUtils.randomAlphanumeric(256)
+
+  private lazy val gwBuilder: GatewayServerBuilder = {
+    new GatewayServerBuilder()
+      .javaPort(0)
+      .callbackClient(0, InetAddress.getByName(GatewayServer.DEFAULT_ADDRESS))
+      .connectTimeout(GatewayServer.DEFAULT_CONNECT_TIMEOUT)
+      .readTimeout(GatewayServer.DEFAULT_READ_TIMEOUT)
+      .customCommands(null)
+  }
 
   object Factory extends Interpreter.Factory {
     def languageName: String = "Python"
     def apply(): RIO[Blocking with Config with ScalaCompiler.Provider with CurrentNotebook with CurrentTask with TaskManager, Interpreter] = for {
       venv        <- VirtualEnvFetcher.fetch()
       gatewayRef   = new AtomicReference[GatewayServer]()
-      interpreter <- PythonInterpreter(venv, "py4j" :: "pyspark" :: PythonInterpreter.sharedModules, getPy4JError(gatewayRef))
+      interpreter <- PythonInterpreter(venv, getPy4JError(gatewayRef))
       _           <- setupPySpark(interpreter, gatewayRef)
     } yield interpreter
 
@@ -45,10 +59,12 @@ object PySparkInterpreter {
         _       <- CurrentTask.update(_.progress(0.2))
         _       <- pySparkImports(interp, spark)
         _       <- CurrentTask.update(_.progress(0.3))
-        gateway <- startPySparkGateway(spark)
+        doAuth  <- shouldAuthenticate(interp)
+        _       <- CurrentTask.update(_.progress(0.4))
+        gateway <- startPySparkGateway(spark, doAuth)
         _       <- CurrentTask.update(_.progress(0.7))
         _       <- ZIO(gatewayRef.set(gateway))
-        _       <- registerGateway(interp, gateway)
+        _       <- registerGateway(interp, gateway, doAuth)
         _       <- CurrentTask.update(_.progress(0.9))
       } yield ()
     }
@@ -72,14 +88,34 @@ object PySparkInterpreter {
     }
   }
 
-  private def startPySparkGateway(spark: SparkSession) = effectBlocking {
-    val gateway = new GatewayServer(
-      spark,
-      0,
-      0,
-      GatewayServer.DEFAULT_CONNECT_TIMEOUT,
-      GatewayServer.DEFAULT_READ_TIMEOUT,
-      null)
+  /**
+    * Whether or not to authenticate, based on the py4j version available.
+    * We can get rid of this when we drop support for Spark 2.1
+    */
+  private def shouldAuthenticate(interp: PythonInterpreter) = for {
+    py4jVersion <- interp.jep {
+      jep =>
+        jep.eval("import py4j")
+        jep.getValue("py4j.__version__", classOf[String])
+    }
+  } yield {
+    val Version = "(\\d+).(\\d+).(\\d+)".r
+
+    py4jVersion match {
+      case Version(_, _, patch) if patch.toInt >= 7 => true
+      case _ => false
+    }
+  }
+
+  private def startPySparkGateway(spark: SparkSession, doAuth: Boolean) = effectBlocking {
+    val builder = if (doAuth) {
+        // use try here just to be extra careful
+        try gwBuilder.authToken(py4jToken) catch {
+          case err: Throwable => gwBuilder
+        }
+    } else gwBuilder
+
+    val gateway = builder.entryPoint(spark).build()
 
     gateway.start(true)
 
@@ -90,16 +126,25 @@ object PySparkInterpreter {
     gateway
   }
 
-  private def registerGateway(interpreter: PythonInterpreter, gateway: GatewayServer) = interpreter.jep {
+  private def registerGateway(interpreter: PythonInterpreter, gateway: GatewayServer, doAuth: Boolean) = interpreter.jep {
     jep =>
       val javaPort = gateway.getListeningPort
 
-      jep.eval(
-        s"""gateway = JavaGateway(
-           |  auto_field = True,
-           |  auto_convert = True,
-           |  gateway_parameters = GatewayParameters(port = $javaPort, auto_convert = True),
-           |  callback_server_parameters = CallbackServerParameters(port = 0))""".stripMargin)
+      if (doAuth) {
+        jep.eval(
+          s"""gateway = JavaGateway(
+             |  auto_field = True,
+             |  auto_convert = True,
+             |  gateway_parameters = GatewayParameters(port = $javaPort, auto_convert = True, auth_token = "$py4jToken"),
+             |  callback_server_parameters = CallbackServerParameters(port = 0, auth_token = "$py4jToken"))""".stripMargin)
+      } else {
+        jep.eval(
+          s"""gateway = JavaGateway(
+             |  auto_field = True,
+             |  auto_convert = True,
+             |  gateway_parameters = GatewayParameters(port = $javaPort, auto_convert = True),
+             |  callback_server_parameters = CallbackServerParameters(port = 0))""".stripMargin)
+      }
 
       // Register shutdown handlers so pyspark exits cleanly. We need to make sure that all threads are closed before stopping jep.
       jep.eval("import atexit")
@@ -124,6 +169,7 @@ object PySparkInterpreter {
 
       gateway.resetCallbackClient(py4j.GatewayServer.defaultAddress(), pythonPort)
 
+      // TODO: `pysparksession` is gross. We need a better solution allowing Predefs to define the same values.
       jep.exec(
         """java_import(gateway.jvm, "org.apache.spark.SparkEnv")
           |java_import(gateway.jvm, "org.apache.spark.SparkConf")
@@ -135,8 +181,8 @@ object PySparkInterpreter {
           |
           |__sparkConf = SparkConf(_jvm = gateway.jvm, _jconf = gateway.entry_point.sparkContext().getConf())
           |sc = SparkContext(jsc = gateway.jvm.org.apache.spark.api.java.JavaSparkContext(gateway.entry_point.sparkContext()), gateway = gateway, conf = __sparkConf)
-          |spark = SparkSession(sc, gateway.entry_point)
-          |sqlContext = spark._wrapped
+          |pysparksession = SparkSession(sc, gateway.entry_point)
+          |sqlContext = pysparksession._wrapped
           |from pyspark.sql import DataFrame
           |""".stripMargin)
   }

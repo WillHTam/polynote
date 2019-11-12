@@ -12,8 +12,23 @@ export class PolynoteMessageEvent<T extends Message> extends CustomEvent<any> {
 type ListenerCallback = (...args: any[]) => void
 export type MessageListener = [typeof Message, ListenerCallback, boolean?];
 
+const mainEl = document.getElementById('Main');
+const socketKey = mainEl ? mainEl.getAttribute('data-ws-key') : null;
+window.addEventListener("beforeunload", evt => {
+    const sess = SocketSession.tryGet;
+    if (sess && sess.isOpen) {
+        sess.close();
+    }
+});
+
 export class SocketSession extends EventTarget {
     private static inst: SocketSession;
+
+    static get tryGet(): SocketSession | null {
+        if (SocketSession.inst)
+            return SocketSession.inst;
+        return null;
+    }
 
     static get get() {
         if (!SocketSession.inst) {
@@ -32,7 +47,7 @@ export class SocketSession extends EventTarget {
 
     mkSocket() {
         const schema = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        this.socket = new WebSocket(schema + document.location.host + '/ws');
+        this.socket = new WebSocket(schema + document.location.host + '/ws?key=' + socketKey);
         this.socket.binaryType = 'arraybuffer';
         this.listeners = {
             message: this.receive.bind(this),
